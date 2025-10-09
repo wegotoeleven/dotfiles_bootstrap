@@ -8,8 +8,8 @@ set -o pipefail  # Exit on pipe failure
 
 # Configuration
 readonly CONFIG_FILE="${HOME}/.config/machine-profile"
-readonly REPO_URL="git@github.com:wegotoeleven/dotfiles_private.git"
-readonly DEFAULT_DOTFILES_DIR="${HOME}/.dotfiles-new"
+readonly REPO_URL="git@github.com:wegotoeleven/dotfiles.git"
+readonly DEFAULT_DOTFILES_DIR="${HOME}/.dotfiles"
 DOTFILES_DIR=""
 
 # Detect the operating system
