@@ -11,6 +11,8 @@ readonly CONFIG_FILE="${HOME}/.config/machine-profile"
 readonly REPO_URL="git@github.com:wegotoeleven/dotfiles.git"
 readonly DEFAULT_DOTFILES_DIR="${HOME}/.dotfiles"
 DOTFILES_DIR=""
+PROMPT_FD=0
+TTY_FD_OPENED=0
 
 # Detect the operating system
 detect_os() {
@@ -84,6 +86,40 @@ to_lower() {
     printf '%s' "${1}" | tr '[:upper:]' '[:lower:]'
 }
 
+setup_prompt_fd() {
+    if [[ -t 0 ]]; then
+        PROMPT_FD=0
+    elif [[ -r /dev/tty ]]; then
+        exec 3</dev/tty
+        PROMPT_FD=3
+        TTY_FD_OPENED=1
+    else
+        echo "Error: No interactive terminal detected; cannot prompt for input." >&2
+        exit 1
+    fi
+}
+
+cleanup_prompt_fd() {
+    if [[ "${TTY_FD_OPENED}" -eq 1 ]]; then
+        exec 3<&-
+    fi
+}
+
+prompt_read() {
+    local __result_var="${1}"
+    local __prompt="${2}"
+    local __input=""
+
+    printf "%s" "${__prompt}" >&2
+    if [[ "${PROMPT_FD}" -eq 0 ]]; then
+        read -r __input
+    else
+        read -r -u "${PROMPT_FD}" __input
+    fi
+
+    printf -v "${__result_var}" '%s' "${__input}"
+}
+
 # Present a menu and get user's choice
 get_choice() {
     local question="${1}"
@@ -96,7 +132,7 @@ get_choice() {
     done
 
     while true; do
-        read -rp "Choose (1-${#options[@]}): " choice >&2
+        prompt_read choice "Choose (1-${#options[@]}): "
         if [[ "${choice}" =~ ^[0-9]+$ ]] && [[ "${choice}" -ge 1 ]] && [[ "${choice}" -le "${#options[@]}" ]]; then
             echo "${options[$((choice - 1))]}"
             return
@@ -191,7 +227,7 @@ clone_dotfiles() {
     use_lower="$(to_lower "${machine_use}")"
 
     while true; do
-        read -rp "Where should dotfiles be cloned? [${DEFAULT_DOTFILES_DIR}]: " dotfiles_dir
+        prompt_read dotfiles_dir "Where should dotfiles be cloned? [${DEFAULT_DOTFILES_DIR}]: "
         dotfiles_dir="${dotfiles_dir:-${DEFAULT_DOTFILES_DIR}}"
 
         if check_directory "${dotfiles_dir}"; then
@@ -255,6 +291,8 @@ main() {
     ensure_dependencies "${detected_os}"
     
     echo
+    setup_prompt_fd
+    trap cleanup_prompt_fd EXIT
 
     # Check for existing configuration
     if read_config && check_config_complete; then
