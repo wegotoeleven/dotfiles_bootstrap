@@ -40,14 +40,23 @@ ensure_dependencies() {
     if [[ "${os}" == "macos" ]]; then
         if ! xcode-select -p &>/dev/null; then
             echo "Xcode Command Line Tools not found. Installing..."
-            xcode-select --install
-            echo ""
-            echo "A dialog should appear. Please click 'Install' and accept the license."
-            echo "Waiting for installation to complete..."
-            echo ""
-            until xcode-select -p &>/dev/null; do
-                sleep 5
-            done
+
+            # Use softwareupdate so this works on headless machines (no GUI popup)
+            local sentinel="/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress"
+            touch "${sentinel}"
+            local pkg
+            pkg=$(softwareupdate -l 2>/dev/null | grep -B 1 "Command Line Tools" | awk -F"*" '/\*/ {print $2}' | sed 's/^ *//' | sort | tail -1)
+
+            if [[ -z "${pkg}" ]]; then
+                echo "Error: Could not find Command Line Tools package via softwareupdate." >&2
+                rm -f "${sentinel}"
+                exit 1
+            fi
+
+            echo "Installing: ${pkg}"
+            softwareupdate -i "${pkg}" --verbose
+            rm -f "${sentinel}"
+
             echo "Xcode Command Line Tools installation complete!"
         fi
         if ! command -v git &>/dev/null; then
