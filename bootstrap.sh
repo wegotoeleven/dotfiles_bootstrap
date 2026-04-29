@@ -64,14 +64,15 @@ ensure_dependencies() {
                 | grep '\* Label: Command Line Tools' \
                 | sed 's/.*Label: //' \
                 | sort | tail -1)
-            rm -f "${sentinel}"
 
             if [[ -z "${pkg}" ]]; then
+                rm -f "${sentinel}"
                 fatal "Could not find Command Line Tools in softwareupdate."
             fi
 
             info "Installing: ${pkg}"
             sudo softwareupdate -i "${pkg}" --verbose
+            rm -f "${sentinel}"
 
             xcode-select -p &>/dev/null \
                 || fatal "Xcode Command Line Tools installation failed."
