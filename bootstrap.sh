@@ -2,14 +2,24 @@
 # bootstrap.sh
 # Automated dotfiles installation with profile-based sparse checkout
 
-set -e  # Exit on error
-set -u  # Exit on undefined variable
-set -o pipefail  # Exit on pipe failure
+set -e          # Exit on error
+set -u          # Exit on undefined variable
+set -o pipefail # Exit on pipe failure
 
 # Configuration
 readonly CONFIG_FILE="${HOME}/.config/machine-profile"
 readonly REPO_URL="git@github.com:wegotoeleven/dotfiles.git"
 readonly DEFAULT_DOTFILES_DIR="${HOME}/.dotfiles"
+
+# Available machine profiles
+readonly PROFILES=(
+    "personal-mac-laptop"
+    "personal-mac-server"
+    "work-mac-laptop"
+    "work-linux-server"
+    "work-linux-laptop"
+)
+
 DOTFILES_DIR=""
 PROMPT_FD=0
 TTY_FD_OPENED=0
@@ -17,54 +27,38 @@ TTY_FD_OPENED=0
 # Detect the operating system
 detect_os() {
     case "$(uname -s)" in
-        Linux*)
-            echo "Linux"
-            ;;
-        Darwin*)
-            echo "macOS"
-            ;;
-        *)
-            echo "Unknown"
-            ;;
+        Linux*)  echo "linux" ;;
+        Darwin*) echo "macos" ;;
+        *)       echo "unknown" ;;
     esac
 }
 
 # Ensure required dependencies are installed
 ensure_dependencies() {
     local os="${1}"
-    
-    if [[ "${os}" == "macOS" ]]; then
-        # Check for Xcode Command Line Tools
+
+    if [[ "${os}" == "macos" ]]; then
         if ! xcode-select -p &>/dev/null; then
             echo "Xcode Command Line Tools not found. Installing..."
             xcode-select --install
-            
             echo ""
             echo "A dialog should appear. Please click 'Install' and accept the license."
             echo "Waiting for installation to complete..."
             echo ""
-            
-            # Wait until xcode-select -p succeeds
             until xcode-select -p &>/dev/null; do
                 sleep 5
             done
-            
             echo "Xcode Command Line Tools installation complete!"
         fi
-        
-        # Verify git is available
         if ! command -v git &>/dev/null; then
             echo "Error: git not found even after Xcode Command Line Tools check"
             exit 1
         fi
-        
         echo "Dependencies verified: git available"
-        
-    elif [[ "${os}" == "Linux" ]]; then
-        # Check for git
+
+    elif [[ "${os}" == "linux" ]]; then
         if ! command -v git &>/dev/null; then
             echo "git not found. Attempting to install..."
-            
             if command -v apt-get &>/dev/null; then
                 sudo apt-get update && sudo apt-get install -y git
             elif command -v dnf &>/dev/null; then
@@ -77,13 +71,8 @@ ensure_dependencies() {
                 exit 1
             fi
         fi
-        
         echo "Dependencies verified: git available"
     fi
-}
-
-to_lower() {
-    printf '%s' "${1}" | tr '[:upper:]' '[:lower:]'
 }
 
 setup_prompt_fd() {
@@ -120,7 +109,7 @@ prompt_read() {
     printf -v "${__result_var}" '%s' "${__input}"
 }
 
-# Present a menu and get user's choice
+# Present a numbered menu and return the chosen option
 get_choice() {
     local question="${1}"
     shift
@@ -142,7 +131,7 @@ get_choice() {
     done
 }
 
-# Read existing configuration if available
+# Read existing configuration if present
 read_config() {
     if [[ -f "${CONFIG_FILE}" ]]; then
         # shellcheck source=/dev/null
@@ -153,53 +142,55 @@ read_config() {
     fi
 }
 
-# Check if configuration is complete
 check_config_complete() {
-    [[ -n "${MACHINE_OS:-}" ]] && [[ -n "${MACHINE_TYPE:-}" ]] && [[ -n "${MACHINE_USE:-}" ]]
+    [[ -n "${MACHINE_PROFILE:-}" ]]
 }
 
-# Setup machine profile configuration
+# Warn if the selected profile's OS doesn't match the detected OS
+validate_profile_os() {
+    local profile="${1}"
+    local detected_os="${2}"
+    local profile_os=""
+
+    if [[ "${profile}" == *"mac"* ]]; then
+        profile_os="macos"
+    elif [[ "${profile}" == *"linux"* ]]; then
+        profile_os="linux"
+    fi
+
+    if [[ -n "${profile_os}" ]] && [[ "${profile_os}" != "${detected_os}" ]]; then
+        echo "Warning: profile '${profile}' is for ${profile_os} but this machine is ${detected_os}." >&2
+        prompt_read confirm "Continue anyway? (y/N): "
+        [[ "${confirm}" =~ ^[Yy]$ ]] || exit 1
+    fi
+}
+
+# Prompt for a profile and write it to the config file
 setup_config() {
-    local machine_os
-    local machine_type
-    local machine_use
-    
-    echo "Setting up machine profile..."
+    local detected_os="${1}"
+    local profile
+
+    echo "No configuration found. Select a profile for this machine:"
+    profile="$(get_choice "Which profile best describes this machine?" "${PROFILES[@]}")"
+
+    validate_profile_os "${profile}" "${detected_os}"
 
     mkdir -p "$(dirname "${CONFIG_FILE}")"
-    machine_os="$(detect_os)"
-
-    echo "Detected OS: ${machine_os}"
-
-    machine_type="$(get_choice "What type of machine is this?" "Server" "Endpoint")"
-    machine_use="$(get_choice "What is this machine used for?" "Work" "Personal")"
-
-    cat > "${CONFIG_FILE}" << EOF
-MACHINE_OS=${machine_os}
-MACHINE_TYPE=${machine_type}
-MACHINE_USE=${machine_use}
-EOF
-
+    echo "MACHINE_PROFILE=${profile}" > "${CONFIG_FILE}"
     echo "Configuration saved to ${CONFIG_FILE}"
-    
-    # Export for use in this script
-    export MACHINE_OS="${machine_os}"
-    export MACHINE_TYPE="${machine_type}"
-    export MACHINE_USE="${machine_use}"
+
+    export MACHINE_PROFILE="${profile}"
 }
 
-# Check if directory is safe to use
+# Check if directory is safe to clone into
 check_directory() {
     local dir="${1}"
-
-    # Expand tilde to home directory
     dir="${dir/#\~/${HOME}}"
 
     if [[ -e "${dir}" ]]; then
         if [[ -d "${dir}" ]]; then
             if [[ -n "$(ls -A "${dir}" 2>/dev/null)" ]]; then
-                echo "Error: Directory ${dir} already exists and is not empty." >&2
-                echo "Please choose a different location or remove the existing directory." >&2
+                echo "Error: ${dir} already exists and is not empty." >&2
                 return 1
             fi
         else
@@ -207,29 +198,17 @@ check_directory() {
             return 1
         fi
     fi
-
     return 0
 }
 
-# Clone dotfiles repository with sparse checkout
+# Clone the dotfiles repo with a sparse checkout containing only the needed roles
 clone_dotfiles() {
-    local machine_os="${1}"
-    local machine_type="${2}"
-    local machine_use="${3}"
+    local profile="${1}"
     local dotfiles_dir
-    local os_lower
-    local type_lower
-    local use_lower
-    
-    # Convert to lowercase for directory names
-    os_lower="$(to_lower "${machine_os}")"
-    type_lower="$(to_lower "${machine_type}")"
-    use_lower="$(to_lower "${machine_use}")"
 
     while true; do
         prompt_read dotfiles_dir "Where should dotfiles be cloned? [${DEFAULT_DOTFILES_DIR}]: "
         dotfiles_dir="${dotfiles_dir:-${DEFAULT_DOTFILES_DIR}}"
-
         if check_directory "${dotfiles_dir}"; then
             break
         fi
@@ -237,83 +216,83 @@ clone_dotfiles() {
         echo
     done
 
-    # Expand tilde to home directory
     dotfiles_dir="${dotfiles_dir/#\~/${HOME}}"
-
     mkdir -p "$(dirname "${dotfiles_dir}")"
 
     echo "Cloning dotfiles to ${dotfiles_dir}..."
-
     git clone --filter=blob:none --no-checkout "${REPO_URL}" "${dotfiles_dir}"
-    
+
     cd "${dotfiles_dir}" || {
         echo "Error: Failed to change directory to ${dotfiles_dir}"
         exit 1
     }
 
-    git config core.sparseCheckout true
-
-    declare -a sparse_paths=(
-        "bootstrap.sh"
-        "README.md"
-        "Makefile"
-        "dotbot/"
-        "common/common/"
-        "common/${type_lower}/"
-        "common/${use_lower}/"
-        "${os_lower}/common/"
-        "${os_lower}/${type_lower}/"
-        "${os_lower}/${use_lower}/"
-    )
-
+    # Step 1: sparse-checkout just profiles/ to read the role list
+    echo "Reading profile configuration from repository..."
     git sparse-checkout init --cone
-    git sparse-checkout set "${sparse_paths[@]}"
+    git sparse-checkout set profiles
+    git checkout
 
+    # Step 2: read the role list from the profile file
+    local profile_file="${dotfiles_dir}/profiles/${profile}"
+    if [[ ! -f "${profile_file}" ]]; then
+        echo "Error: Profile '${profile}' not found in repository." >&2
+        exit 1
+    fi
+
+    local roles=()
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        [[ -n "${line}" ]] && roles+=("${line}")
+    done < "${profile_file}"
+
+    # Step 3: expand the sparse checkout to include all required roles
+    local sparse_dirs=("profiles" "dotbot")
+    for role in "${roles[@]}"; do
+        sparse_dirs+=("roles/${role}")
+    done
+
+    echo "Checking out roles: ${roles[*]}"
+    git sparse-checkout set "${sparse_dirs[@]}"
     git checkout
 
     git submodule update --init --recursive
 
-    echo "Dotfiles cloned successfully to ${dotfiles_dir}"
-    echo "Downloaded configuration for: ${machine_type}-${machine_os}-${machine_use}"
+    echo ""
+    echo "Dotfiles cloned to ${dotfiles_dir}"
+    echo "  Profile: ${profile}"
+    echo "  Roles:   ${roles[*]}"
     DOTFILES_DIR="${dotfiles_dir}"
 }
 
-# Main execution
 main() {
     echo "Starting dotfiles bootstrap..."
     echo
 
-    # Detect OS first
     local detected_os
     detected_os="$(detect_os)"
-    
-    # Ensure dependencies exist
+
     ensure_dependencies "${detected_os}"
-    
     echo
+
     setup_prompt_fd
     trap cleanup_prompt_fd EXIT
 
-    # Check for existing configuration
     if read_config && check_config_complete; then
         echo "Found existing configuration:"
-        echo "  OS:     ${MACHINE_OS}"
-        echo "  Type:   ${MACHINE_TYPE}"
-        echo "  Use:    ${MACHINE_USE}"
+        echo "  Profile: ${MACHINE_PROFILE}"
     else
-        echo "Configuration incomplete or missing."
-        setup_config
+        setup_config "${detected_os}"
     fi
 
     echo
-
-    clone_dotfiles "${MACHINE_OS}" "${MACHINE_TYPE}" "${MACHINE_USE}"
+    clone_dotfiles "${MACHINE_PROFILE}"
 
     echo
-    echo "Bootstrap complete!"
-    echo "Next steps:"
+    echo "Bootstrap complete! Next steps:"
     echo "  cd ${DOTFILES_DIR:-${DEFAULT_DOTFILES_DIR}}"
-    echo "  make install"
+    echo "  make dotfiles   # apply symlinks"
+    echo "  make install    # install packages"
+    echo "  make config     # apply system settings"
 }
 
 main "$@"
