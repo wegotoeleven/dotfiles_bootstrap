@@ -11,15 +11,6 @@ readonly CONFIG_FILE="${HOME}/.config/machine-profile"
 readonly REPO_URL="git@github.com:wegotoeleven/dotfiles.git"
 readonly DEFAULT_DOTFILES_DIR="${HOME}/.dotfiles"
 
-# Available machine profiles
-readonly PROFILES=(
-    "personal-mac-laptop"
-    "personal-mac-server"
-    "work-mac-laptop"
-    "work-linux-server"
-    "work-linux-laptop"
-)
-
 DOTFILES_DIR=""
 PROMPT_FD=0
 TTY_FD_OPENED=0
@@ -174,23 +165,6 @@ validate_profile_os() {
     fi
 }
 
-# Prompt for a profile and write it to the config file
-setup_config() {
-    local detected_os="${1}"
-    local profile
-
-    echo "No configuration found. Select a profile for this machine:"
-    profile="$(get_choice "Which profile best describes this machine?" "${PROFILES[@]}")"
-
-    validate_profile_os "${profile}" "${detected_os}"
-
-    mkdir -p "$(dirname "${CONFIG_FILE}")"
-    echo "MACHINE_PROFILE=${profile}" > "${CONFIG_FILE}"
-    echo "Configuration saved to ${CONFIG_FILE}"
-
-    export MACHINE_PROFILE="${profile}"
-}
-
 # Check if directory is safe to clone into
 check_directory() {
     local dir="${1}"
@@ -212,7 +186,7 @@ check_directory() {
 
 # Clone the dotfiles repo with a sparse checkout containing only the needed roles
 clone_dotfiles() {
-    local profile="${1}"
+    local detected_os="${1}"
     local dotfiles_dir
 
     while true; do
@@ -236,25 +210,50 @@ clone_dotfiles() {
         exit 1
     }
 
-    # Step 1: sparse-checkout just profiles/ to read the role list
-    echo "Reading profile configuration from repository..."
+    # Step 1: sparse-checkout just profiles/ to read available profiles
+    echo "Fetching available profiles..."
     git sparse-checkout init --cone
     git sparse-checkout set profiles
     git checkout
 
-    # Step 2: read the role list from the profile file
-    local profile_file="${dotfiles_dir}/profiles/${profile}"
-    if [[ ! -f "${profile_file}" ]]; then
-        echo "Error: Profile '${profile}' not found in repository." >&2
-        exit 1
+    # Step 2: determine which profile to use
+    local profile
+    if check_config_complete; then
+        profile="${MACHINE_PROFILE}"
+        echo "Using existing profile: ${profile}"
+        if [[ ! -f "${dotfiles_dir}/profiles/${profile}" ]]; then
+            echo "Error: Existing profile '${profile}' not found in repository." >&2
+            exit 1
+        fi
+    else
+        # Build profile list from what's actually in the repo
+        local profiles=()
+        for f in "${dotfiles_dir}/profiles/"*; do
+            [[ -f "${f}" ]] && profiles+=("$(basename "${f}")")
+        done
+
+        if [[ ${#profiles[@]} -eq 0 ]]; then
+            echo "Error: No profiles found in repository." >&2
+            exit 1
+        fi
+
+        echo ""
+        profile="$(get_choice "Select a profile for this machine:" "${profiles[@]}")"
+        validate_profile_os "${profile}" "${detected_os}"
+
+        mkdir -p "$(dirname "${CONFIG_FILE}")"
+        echo "MACHINE_PROFILE=${profile}" > "${CONFIG_FILE}"
+        echo "Configuration saved to ${CONFIG_FILE}"
+        export MACHINE_PROFILE="${profile}"
     fi
 
+    # Step 3: read the role list from the profile file
     local roles=()
     while IFS= read -r line || [[ -n "${line}" ]]; do
         [[ -n "${line}" ]] && roles+=("${line}")
-    done < "${profile_file}"
+    done < "${dotfiles_dir}/profiles/${profile}"
 
-    # Step 3: expand the sparse checkout to include all required roles
+    # Step 4: expand the sparse checkout to include all required roles
     local sparse_dirs=("profiles" "dotbot")
     for role in "${roles[@]}"; do
         sparse_dirs+=("roles/${role}")
@@ -289,12 +288,10 @@ main() {
     if read_config && check_config_complete; then
         echo "Found existing configuration:"
         echo "  Profile: ${MACHINE_PROFILE}"
-    else
-        setup_config "${detected_os}"
+        echo
     fi
 
-    echo
-    clone_dotfiles "${MACHINE_PROFILE}"
+    clone_dotfiles "${detected_os}"
 
     echo
     echo "Bootstrap complete! Next steps:"
