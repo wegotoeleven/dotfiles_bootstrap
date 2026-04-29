@@ -37,9 +37,13 @@ ensure_dependencies() {
             local sentinel="/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress"
             touch "${sentinel}"
             local pkg
+            # Extract the label, then normalise to the identifier format softwareupdate -i
+            # expects: strip "Label: ", replace the space before the version with a hyphen,
+            # and drop any build suffix (e.g. "Xcode 26.4-26.4.1" → "Xcode-26.4").
             pkg=$(softwareupdate -l 2>/dev/null \
-                | grep '^\s*\* Label: Command Line Tools' \
+                | grep '\* Label: Command Line Tools' \
                 | sed 's/.*Label: //' \
+                | sed 's/ \([0-9][0-9.]*\).*$/-\1/' \
                 | sort | tail -1)
             rm -f "${sentinel}"
 
@@ -49,7 +53,7 @@ ensure_dependencies() {
             fi
 
             echo "Installing: ${pkg}"
-            softwareupdate -i "${pkg}" --verbose
+            sudo softwareupdate -i "${pkg}" --verbose
 
             if ! xcode-select -p &>/dev/null; then
                 echo "Error: Xcode Command Line Tools installation failed." >&2
