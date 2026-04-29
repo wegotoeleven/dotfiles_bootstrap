@@ -22,13 +22,13 @@ TTY_FD_OPENED=0
 
 
 # Print an error message to stderr and exit.
-die() {
-    echo "Error: ${*}" >&2
+fatal() {
+    echo "Fatal: ${*}" >&2
     exit 1
 }
 
 # Print a progress message to stdout.
-log() {
+info() {
     echo "==> ${*}"
 }
 
@@ -38,7 +38,7 @@ detect_os() {
     case "$(uname -s)" in
         Darwin*) echo "macos" ;;
         Linux*)  echo "linux" ;;
-        *)       echo "unknown" ;;
+        *)       fatal "Unsupported OS: $(uname -s)." ;;
     esac
 }
 
@@ -50,7 +50,7 @@ ensure_dependencies() {
 
     if [[ "${os}" == "macos" ]]; then
         if ! xcode-select -p &>/dev/null; then
-            log "Xcode Command Line Tools not found. Installing..."
+            info "Xcode Command Line Tools not found. Installing..."
 
             # softwareupdate works headlessly; xcode-select --install
             # requires a GUI. The sentinel causes softwareupdate to
@@ -67,23 +67,23 @@ ensure_dependencies() {
             rm -f "${sentinel}"
 
             if [[ -z "${pkg}" ]]; then
-                die "Could not find Command Line Tools in softwareupdate."
+                fatal "Could not find Command Line Tools in softwareupdate."
             fi
 
-            log "Installing: ${pkg}"
+            info "Installing: ${pkg}"
             sudo softwareupdate -i "${pkg}" --verbose
 
             xcode-select -p &>/dev/null \
-                || die "Xcode Command Line Tools installation failed."
-            log "Xcode Command Line Tools installation complete."
+                || fatal "Xcode Command Line Tools installation failed."
+            info "Xcode Command Line Tools installation complete."
         fi
 
         command -v git &>/dev/null \
-            || die "git not found after installing Xcode Command Line Tools."
+            || fatal "git not found after installing Xcode Command Line Tools."
 
     elif [[ "${os}" == "linux" ]]; then
         if ! command -v git &>/dev/null; then
-            log "git not found. Attempting to install..."
+            info "git not found. Attempting to install..."
             if command -v apt-get &>/dev/null; then
                 sudo apt-get update && sudo apt-get install -y git
             elif command -v dnf &>/dev/null; then
@@ -91,15 +91,13 @@ ensure_dependencies() {
             elif command -v yum &>/dev/null; then
                 sudo yum install -y git
             else
-                die "Cannot install git automatically; install it manually."
+                fatal "Cannot install git automatically; install it manually."
             fi
         fi
 
-    else
-        die "Unsupported OS: ${os}."
     fi
 
-    log "Dependencies verified: git available."
+    info "Dependencies verified: git available."
 }
 
 
@@ -112,7 +110,7 @@ setup_prompt_fd() {
         PROMPT_FD=3
         TTY_FD_OPENED=1
     else
-        die "No interactive terminal detected; cannot prompt for input."
+        fatal "No interactive terminal detected; cannot prompt for input."
     fi
 }
 
@@ -169,8 +167,9 @@ get_choice() {
 
 # Sources ~/.config/machine-profile if it exists.
 read_config() {
+    [[ -f "${CONFIG_FILE}" ]] || return 0
     # shellcheck source=/dev/null
-    [[ -f "${CONFIG_FILE}" ]] && source "${CONFIG_FILE}"
+    source "${CONFIG_FILE}" || fatal "Failed to parse ${CONFIG_FILE}."
 }
 
 # Returns 0 if MACHINE_PROFILE is set and non-empty.
@@ -185,8 +184,8 @@ validate_profile_os() {
     local detected_os="${2}"
     local profile_os=""
 
-    [[ "${profile}" == *"mac"* ]]   && profile_os="macos"
-    [[ "${profile}" == *"linux"* ]] && profile_os="linux"
+    if [[ "${profile}" == *"mac"* ]];   then profile_os="macos"; fi
+    if [[ "${profile}" == *"linux"* ]]; then profile_os="linux"; fi
 
     if [[ -n "${profile_os}" ]] \
         && [[ "${profile_os}" != "${detected_os}" ]]; then
@@ -214,18 +213,20 @@ check_directory() {
         echo "Error: ${dir} exists and is not empty." >&2
         return 1
     fi
+
+    return 0
 }
 
 # Clones the dotfiles repo with a sparse checkout of only the required roles.
 # Prompts for clone location and (if not already configured) machine profile.
-# Sets the DOTFILES_DIR global on success.
+# Sets the DOTFILES_DIR global and changes the working directory on success.
 # Args: $1 — OS name as returned by detect_os.
 clone_dotfiles() {
     local detected_os="${1}"
     local dotfiles_dir
+    local prompt
 
     while true; do
-        local prompt
         prompt="Where should dotfiles be cloned? [${DEFAULT_DOTFILES_DIR}]: "
         prompt_read dotfiles_dir "${prompt}"
         dotfiles_dir="${dotfiles_dir:-${DEFAULT_DOTFILES_DIR}}"
@@ -237,12 +238,12 @@ clone_dotfiles() {
     dotfiles_dir="${dotfiles_dir/#\~/${HOME}}"
     mkdir -p "$(dirname "${dotfiles_dir}")"
 
-    log "Cloning dotfiles to ${dotfiles_dir}..."
+    info "Cloning dotfiles to ${dotfiles_dir}..."
     git clone --filter=blob:none --no-checkout "${REPO_URL}" "${dotfiles_dir}"
-    cd "${dotfiles_dir}" || die "Failed to cd to ${dotfiles_dir}."
+    cd "${dotfiles_dir}" || fatal "Failed to cd to ${dotfiles_dir}."
 
     # Sparse-checkout profiles/ only so we can read the available profiles.
-    log "Fetching available profiles..."
+    info "Fetching available profiles..."
     git sparse-checkout init --cone
     git sparse-checkout set profiles
     git checkout
@@ -250,16 +251,16 @@ clone_dotfiles() {
     local profile
     if is_config_complete; then
         profile="${MACHINE_PROFILE}"
-        log "Using existing profile: ${profile}"
+        info "Using existing profile: ${profile}"
         [[ -f "${dotfiles_dir}/profiles/${profile}" ]] \
-            || die "Existing profile '${profile}' not found in repository."
+            || fatal "Existing profile '${profile}' not found in repository."
     else
         local profiles=()
         for f in "${dotfiles_dir}/profiles/"*; do
             [[ -f "${f}" ]] && profiles+=("$(basename "${f}")")
         done
 
-        [[ ${#profiles[@]} -gt 0 ]] || die "No profiles found in repository."
+        [[ ${#profiles[@]} -gt 0 ]] || fatal "No profiles found in repository."
 
         echo
         local question="Select a profile for this machine:"
@@ -268,7 +269,7 @@ clone_dotfiles() {
 
         mkdir -p "$(dirname "${CONFIG_FILE}")"
         echo "MACHINE_PROFILE=${profile}" > "${CONFIG_FILE}"
-        log "Configuration saved to ${CONFIG_FILE}."
+        info "Configuration saved to ${CONFIG_FILE}."
         export MACHINE_PROFILE="${profile}"
     fi
 
@@ -284,13 +285,14 @@ clone_dotfiles() {
         sparse_dirs+=("roles/${role}")
     done
 
-    log "Checking out roles: ${roles[*]}"
+    info "Checking out roles: ${roles[*]}"
     git sparse-checkout set "${sparse_dirs[@]}"
     git checkout
-    git submodule update --init --recursive
+    git submodule update --init --recursive \
+        || fatal "Failed to initialise submodules."
 
     echo
-    log "Dotfiles cloned to ${dotfiles_dir}"
+    info "Dotfiles cloned to ${dotfiles_dir}"
     echo "  Profile: ${profile}"
     echo "  Roles:   ${roles[*]}"
     DOTFILES_DIR="${dotfiles_dir}"
