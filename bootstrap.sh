@@ -287,7 +287,7 @@ clone_dotfiles() {
     done
 
     info "Checking out roles: ${roles[*]}"
-    git sparse-checkout set "${sparse_dirs[@]}"
+    git sparse-checkout set --skip-checks "${sparse_dirs[@]}"
     git checkout
     git submodule update --init --recursive \
         || fatal "Failed to initialise submodules."
