@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 #
-# Automated dotfiles installation using hostname-based manifests.
-#
-# Clones the dotfiles repository and performs a sparse checkout of only
-# the catalog items listed in this machine's manifest file.
+# Clones the dotfiles repo and checks out only the catalog items listed
+# in this host's manifest.
 
 set -euo pipefail
 
@@ -19,20 +17,16 @@ DOTFILES_DIR=""
 PROMPT_FD=0
 TTY_FD_OPENED=0
 
-
-# Print an error message to stderr and exit.
 fatal() {
     echo "Fatal: ${*}" >&2
     exit 1
 }
 
-# Print a progress message to stdout.
 info() {
     echo "==> ${*}"
 }
 
-
-# Returns the normalised OS name: "macos", "linux", or "unknown".
+# Returns the normalised OS name: "macos" or "linux".
 detect_os() {
     case "$(uname -s)" in
         Darwin*) echo "macos" ;;
@@ -55,14 +49,15 @@ ensure_dependencies() {
             # requires a GUI. The sentinel causes softwareupdate to
             # surface the CLT package.
             local sentinel
-            sentinel="/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress"
+            sentinel="/tmp/.com.apple.dt.CommandLineTools"
+            sentinel+=".installondemand.in-progress"
             touch "${sentinel}"
 
             local pkg
             pkg=$(softwareupdate -l 2>/dev/null \
                 | grep '\* Label: Command Line Tools' \
                 | sed 's/.*Label: //' \
-                | sort | tail -1)
+                | sort | tail -n 1)
 
             if [[ -z "${pkg}" ]]; then
                 rm -f "${sentinel}"
@@ -98,7 +93,6 @@ ensure_dependencies() {
 
     info "Dependencies verified: git available."
 }
-
 
 # Opens /dev/tty as FD 3 if stdin is not a terminal (e.g. curl | bash).
 setup_prompt_fd() {
@@ -158,7 +152,6 @@ check_directory() {
     return 0
 }
 
-
 # Clones the dotfiles repo with a sparse checkout of only the catalog
 # items listed in this machine's manifest.
 # Sets the DOTFILES_DIR global and changes the working directory on success.
@@ -207,6 +200,7 @@ clone_dotfiles() {
 
     # Expand sparse checkout to include all required catalog items.
     local sparse_dirs=("manifests" "dotbot")
+    local item
     for item in "${items[@]}"; do
         sparse_dirs+=("catalog/${item}")
     done
@@ -224,9 +218,8 @@ clone_dotfiles() {
     DOTFILES_DIR="${dotfiles_dir}"
 }
 
-
 main() {
-    echo "Starting dotfiles bootstrap..."
+    info "Starting dotfiles bootstrap..."
     echo
 
     local detected_os
@@ -241,7 +234,7 @@ main() {
     clone_dotfiles
 
     echo
-    echo "Bootstrap complete! Next steps:"
+    info "Bootstrap complete! Next steps:"
     echo "  cd ${DOTFILES_DIR:-${DEFAULT_DOTFILES_DIR}}"
     echo "  make dotfiles   # apply symlinks"
     echo "  make install    # install packages"
