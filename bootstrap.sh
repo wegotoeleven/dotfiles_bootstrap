@@ -1,76 +1,89 @@
 #!/usr/bin/env bash
-# bootstrap.sh
-# Automated dotfiles installation with profile-based sparse checkout
+#
+# Automated dotfiles installation with profile-based sparse checkout.
+#
+# Clones the dotfiles repository, prompts for a machine profile, and performs
+# a sparse checkout of only the roles required by that profile.
 
-set -e          # Exit on error
-set -u          # Exit on undefined variable
-set -o pipefail # Exit on pipe failure
+set -euo pipefail
 
-# Configuration
 readonly CONFIG_FILE="${HOME}/.config/machine-profile"
 readonly REPO_URL="git@github.com:wegotoeleven/dotfiles.git"
 readonly DEFAULT_DOTFILES_DIR="${HOME}/.dotfiles"
 
+# Set by clone_dotfiles(); used in main() for the next-steps message.
 DOTFILES_DIR=""
+
+# File descriptor for interactive prompts (0 = stdin, 3 = /dev/tty).
+# TTY_FD_OPENED tracks whether we opened /dev/tty so cleanup_prompt_fd()
+# can close it.
 PROMPT_FD=0
 TTY_FD_OPENED=0
 
-# Detect the operating system
+
+# Print an error message to stderr and exit.
+die() {
+    echo "Error: ${*}" >&2
+    exit 1
+}
+
+# Print a progress message to stdout.
+log() {
+    echo "==> ${*}"
+}
+
+
+# Returns the normalised OS name: "macos", "linux", or "unknown".
 detect_os() {
     case "$(uname -s)" in
-        Linux*)  echo "linux" ;;
         Darwin*) echo "macos" ;;
+        Linux*)  echo "linux" ;;
         *)       echo "unknown" ;;
     esac
 }
 
-# Ensure required dependencies are installed
+# Ensures git is available, installing Xcode Command Line Tools or
+# apt packages as needed.
+# Args: $1 — OS name as returned by detect_os.
 ensure_dependencies() {
     local os="${1}"
 
     if [[ "${os}" == "macos" ]]; then
         if ! xcode-select -p &>/dev/null; then
-            echo "Xcode Command Line Tools not found. Installing..."
+            log "Xcode Command Line Tools not found. Installing..."
 
-            # Use softwareupdate so this works on headless machines (no GUI popup).
-            # The sentinel file causes softwareupdate to surface the CLT package.
-            local sentinel="/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress"
+            # softwareupdate works headlessly; xcode-select --install
+            # requires a GUI. The sentinel causes softwareupdate to
+            # surface the CLT package.
+            local sentinel
+            sentinel="/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress"
             touch "${sentinel}"
+
             local pkg
-            # Extract the label, then normalise to the identifier format softwareupdate -i
-            # expects: strip "Label: ", replace the space before the version with a hyphen,
-            # and drop any build suffix (e.g. "Xcode 26.4-26.4.1" → "Xcode-26.4").
             pkg=$(softwareupdate -l 2>/dev/null \
                 | grep '\* Label: Command Line Tools' \
                 | sed 's/.*Label: //' \
-                | sed 's/ \([0-9][0-9.]*\).*$/-\1/' \
                 | sort | tail -1)
             rm -f "${sentinel}"
 
             if [[ -z "${pkg}" ]]; then
-                echo "Error: Could not find Command Line Tools package via softwareupdate." >&2
-                exit 1
+                die "Could not find Command Line Tools in softwareupdate."
             fi
 
-            echo "Installing: ${pkg}"
+            log "Installing: ${pkg}"
             sudo softwareupdate -i "${pkg}" --verbose
 
-            if ! xcode-select -p &>/dev/null; then
-                echo "Error: Xcode Command Line Tools installation failed." >&2
-                exit 1
-            fi
+            xcode-select -p &>/dev/null \
+                || die "Xcode Command Line Tools installation failed."
+            log "Xcode Command Line Tools installation complete."
+        fi
 
-            echo "Xcode Command Line Tools installation complete!"
-        fi
-        if ! command -v git &>/dev/null; then
-            echo "Error: git not found even after Xcode Command Line Tools check"
-            exit 1
-        fi
-        echo "Dependencies verified: git available"
+        command -v git &>/dev/null \
+            || die "git not found after installing Xcode Command Line Tools."
 
     elif [[ "${os}" == "linux" ]]; then
         if ! command -v git &>/dev/null; then
-            echo "git not found. Attempting to install..."
+            log "git not found. Attempting to install..."
             if command -v apt-get &>/dev/null; then
                 sudo apt-get update && sudo apt-get install -y git
             elif command -v dnf &>/dev/null; then
@@ -78,15 +91,19 @@ ensure_dependencies() {
             elif command -v yum &>/dev/null; then
                 sudo yum install -y git
             else
-                echo "Error: Unable to install git automatically."
-                echo "Please install git manually and re-run this script."
-                exit 1
+                die "Cannot install git automatically; install it manually."
             fi
         fi
-        echo "Dependencies verified: git available"
+
+    else
+        die "Unsupported OS: ${os}."
     fi
+
+    log "Dependencies verified: git available."
 }
 
+
+# Opens /dev/tty as FD 3 if stdin is not a terminal (e.g. curl | bash).
 setup_prompt_fd() {
     if [[ -t 0 ]]; then
         PROMPT_FD=0
@@ -95,17 +112,20 @@ setup_prompt_fd() {
         PROMPT_FD=3
         TTY_FD_OPENED=1
     else
-        echo "Error: No interactive terminal detected; cannot prompt for input." >&2
-        exit 1
+        die "No interactive terminal detected; cannot prompt for input."
     fi
 }
 
+# Closes FD 3 if setup_prompt_fd() opened it.
 cleanup_prompt_fd() {
     if [[ "${TTY_FD_OPENED}" -eq 1 ]]; then
         exec 3<&-
     fi
 }
 
+# Prompt the user for input and store the result in a named variable.
+# Args: $1 — name of the variable to assign the result to.
+#        $2 — prompt string.
 prompt_read() {
     local __result_var="${1}"
     local __prompt="${2}"
@@ -121,7 +141,8 @@ prompt_read() {
     printf -v "${__result_var}" '%s' "${__input}"
 }
 
-# Present a numbered menu and return the chosen option
+# Present a numbered menu and return the chosen option on stdout.
+# Args: $1 — question string; $2... — menu options.
 get_choice() {
     local question="${1}"
     shift
@@ -132,81 +153,83 @@ get_choice() {
         echo "$((i + 1))) ${options[$i]}" >&2
     done
 
+    local choice
     while true; do
         prompt_read choice "Choose (1-${#options[@]}): "
-        if [[ "${choice}" =~ ^[0-9]+$ ]] && [[ "${choice}" -ge 1 ]] && [[ "${choice}" -le "${#options[@]}" ]]; then
+        if [[ "${choice}" =~ ^[0-9]+$ ]] \
+            && [[ "${choice}" -ge 1 ]] \
+            && [[ "${choice}" -le "${#options[@]}" ]]; then
             echo "${options[$((choice - 1))]}"
             return
-        else
-            echo "Invalid choice. Please try again." >&2
         fi
+        echo "Invalid choice. Please try again." >&2
     done
 }
 
-# Read existing configuration if present
+
+# Sources ~/.config/machine-profile if it exists.
 read_config() {
-    if [[ -f "${CONFIG_FILE}" ]]; then
-        # shellcheck source=/dev/null
-        source "${CONFIG_FILE}"
-        return 0
-    else
-        return 1
-    fi
+    # shellcheck source=/dev/null
+    [[ -f "${CONFIG_FILE}" ]] && source "${CONFIG_FILE}"
 }
 
-check_config_complete() {
+# Returns 0 if MACHINE_PROFILE is set and non-empty.
+is_config_complete() {
     [[ -n "${MACHINE_PROFILE:-}" ]]
 }
 
-# Warn if the selected profile's OS doesn't match the detected OS
+# Warns if the profile's implied OS doesn't match the detected OS.
+# Args: $1 — profile name; $2 — OS name as returned by detect_os.
 validate_profile_os() {
     local profile="${1}"
     local detected_os="${2}"
     local profile_os=""
 
-    if [[ "${profile}" == *"mac"* ]]; then
-        profile_os="macos"
-    elif [[ "${profile}" == *"linux"* ]]; then
-        profile_os="linux"
-    fi
+    [[ "${profile}" == *"mac"* ]]   && profile_os="macos"
+    [[ "${profile}" == *"linux"* ]] && profile_os="linux"
 
-    if [[ -n "${profile_os}" ]] && [[ "${profile_os}" != "${detected_os}" ]]; then
-        echo "Warning: profile '${profile}' is for ${profile_os} but this machine is ${detected_os}." >&2
+    if [[ -n "${profile_os}" ]] \
+        && [[ "${profile_os}" != "${detected_os}" ]]; then
+        echo "Warning: profile '${profile}' is for ${profile_os}" \
+            "but this machine is ${detected_os}." >&2
+        local confirm
         prompt_read confirm "Continue anyway? (y/N): "
         [[ "${confirm}" =~ ^[Yy]$ ]] || exit 1
     fi
 }
 
-# Check if directory is safe to clone into
+# Returns 0 if $1 is a path safe to clone into (absent or empty directory).
+# Args: $1 — target path (tilde expansion is applied).
 check_directory() {
-    local dir="${1}"
-    dir="${dir/#\~/${HOME}}"
+    local dir="${1/#\~/${HOME}}"
 
-    if [[ -e "${dir}" ]]; then
-        if [[ -d "${dir}" ]]; then
-            if [[ -n "$(ls -A "${dir}" 2>/dev/null)" ]]; then
-                echo "Error: ${dir} already exists and is not empty." >&2
-                return 1
-            fi
-        else
-            echo "Error: ${dir} exists but is not a directory." >&2
-            return 1
-        fi
+    [[ -e "${dir}" ]] || return 0
+
+    if [[ ! -d "${dir}" ]]; then
+        echo "Error: ${dir} exists but is not a directory." >&2
+        return 1
     fi
-    return 0
+
+    if [[ -n "$(ls -A "${dir}" 2>/dev/null)" ]]; then
+        echo "Error: ${dir} exists and is not empty." >&2
+        return 1
+    fi
 }
 
-# Clone the dotfiles repo with a sparse checkout containing only the needed roles
+# Clones the dotfiles repo with a sparse checkout of only the required roles.
+# Prompts for clone location and (if not already configured) machine profile.
+# Sets the DOTFILES_DIR global on success.
+# Args: $1 — OS name as returned by detect_os.
 clone_dotfiles() {
     local detected_os="${1}"
     local dotfiles_dir
 
     while true; do
-        prompt_read dotfiles_dir "Where should dotfiles be cloned? [${DEFAULT_DOTFILES_DIR}]: "
+        local prompt
+        prompt="Where should dotfiles be cloned? [${DEFAULT_DOTFILES_DIR}]: "
+        prompt_read dotfiles_dir "${prompt}"
         dotfiles_dir="${dotfiles_dir:-${DEFAULT_DOTFILES_DIR}}"
-        if check_directory "${dotfiles_dir}"; then
-            break
-        fi
+        check_directory "${dotfiles_dir}" && break
         echo "Please try again."
         echo
     done
@@ -214,75 +237,65 @@ clone_dotfiles() {
     dotfiles_dir="${dotfiles_dir/#\~/${HOME}}"
     mkdir -p "$(dirname "${dotfiles_dir}")"
 
-    echo "Cloning dotfiles to ${dotfiles_dir}..."
+    log "Cloning dotfiles to ${dotfiles_dir}..."
     git clone --filter=blob:none --no-checkout "${REPO_URL}" "${dotfiles_dir}"
+    cd "${dotfiles_dir}" || die "Failed to cd to ${dotfiles_dir}."
 
-    cd "${dotfiles_dir}" || {
-        echo "Error: Failed to change directory to ${dotfiles_dir}"
-        exit 1
-    }
-
-    # Step 1: sparse-checkout just profiles/ to read available profiles
-    echo "Fetching available profiles..."
+    # Sparse-checkout profiles/ only so we can read the available profiles.
+    log "Fetching available profiles..."
     git sparse-checkout init --cone
     git sparse-checkout set profiles
     git checkout
 
-    # Step 2: determine which profile to use
     local profile
-    if check_config_complete; then
+    if is_config_complete; then
         profile="${MACHINE_PROFILE}"
-        echo "Using existing profile: ${profile}"
-        if [[ ! -f "${dotfiles_dir}/profiles/${profile}" ]]; then
-            echo "Error: Existing profile '${profile}' not found in repository." >&2
-            exit 1
-        fi
+        log "Using existing profile: ${profile}"
+        [[ -f "${dotfiles_dir}/profiles/${profile}" ]] \
+            || die "Existing profile '${profile}' not found in repository."
     else
-        # Build profile list from what's actually in the repo
         local profiles=()
         for f in "${dotfiles_dir}/profiles/"*; do
             [[ -f "${f}" ]] && profiles+=("$(basename "${f}")")
         done
 
-        if [[ ${#profiles[@]} -eq 0 ]]; then
-            echo "Error: No profiles found in repository." >&2
-            exit 1
-        fi
+        [[ ${#profiles[@]} -gt 0 ]] || die "No profiles found in repository."
 
-        echo ""
-        profile="$(get_choice "Select a profile for this machine:" "${profiles[@]}")"
+        echo
+        local question="Select a profile for this machine:"
+        profile="$(get_choice "${question}" "${profiles[@]}")"
         validate_profile_os "${profile}" "${detected_os}"
 
         mkdir -p "$(dirname "${CONFIG_FILE}")"
         echo "MACHINE_PROFILE=${profile}" > "${CONFIG_FILE}"
-        echo "Configuration saved to ${CONFIG_FILE}"
+        log "Configuration saved to ${CONFIG_FILE}."
         export MACHINE_PROFILE="${profile}"
     fi
 
-    # Step 3: read the role list from the profile file
+    # Read the role list from the profile file.
     local roles=()
     while IFS= read -r line || [[ -n "${line}" ]]; do
         [[ -n "${line}" ]] && roles+=("${line}")
     done < "${dotfiles_dir}/profiles/${profile}"
 
-    # Step 4: expand the sparse checkout to include all required roles
+    # Expand the sparse checkout to include all required roles.
     local sparse_dirs=("profiles" "dotbot")
     for role in "${roles[@]}"; do
         sparse_dirs+=("roles/${role}")
     done
 
-    echo "Checking out roles: ${roles[*]}"
+    log "Checking out roles: ${roles[*]}"
     git sparse-checkout set "${sparse_dirs[@]}"
     git checkout
-
     git submodule update --init --recursive
 
-    echo ""
-    echo "Dotfiles cloned to ${dotfiles_dir}"
+    echo
+    log "Dotfiles cloned to ${dotfiles_dir}"
     echo "  Profile: ${profile}"
     echo "  Roles:   ${roles[*]}"
     DOTFILES_DIR="${dotfiles_dir}"
 }
+
 
 main() {
     echo "Starting dotfiles bootstrap..."
@@ -297,7 +310,8 @@ main() {
     setup_prompt_fd
     trap cleanup_prompt_fd EXIT
 
-    if read_config && check_config_complete; then
+    read_config
+    if is_config_complete; then
         echo "Found existing configuration:"
         echo "  Profile: ${MACHINE_PROFILE}"
         echo
